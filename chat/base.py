@@ -110,6 +110,9 @@ def main(
     compile: bool = False,
 ) -> None:
     """Starts a conversation with a tuned GPT model.
+    checkpoint_dir: Path = Path("checkpoints/stabilityai/stablelm-tuned-alpha-3b"),
+    checkpoint_dir: Path = Path("/home/peter/GitHub/lit-gpt/checkpoints/TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"),
+
 
     Args:
         top_k: The number of top most probable tokens to consider in the sampling process.
@@ -254,6 +257,25 @@ def prompt_config(checkpoint_dir: Path, tokenizer: Tokenizer) -> Tuple[str, Tupl
         system_prompt = (
             "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, "
             "detailed, and polite answers to the user's questions. USER: {prompt} ASSISTANT:"
+        )
+        # system_prompt = (
+        #     "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, "
+        #     "detailed, and polite answers to the user's questions. USER: {prompt} ASSISTANT:"
+
+
+        stop_tokens = ([tokenizer.eos_id],)
+        return system_prompt, stop_tokens
+
+    if re.search("TinyLlama*", checkpoint_name):
+        system_prompt = (
+            "### System:\nYou are a helpful but snarky and flipant assistant. Always answer as helpfully as"
+            " possible, while making the repsponse funny.\n\nIf a question does not make any sense, or is not"
+            " factually coherent, explain why instead of answering something not correct. If you don't know"
+            " the answer to a question, please don't"
+            " share false information.\n\n"
+            "### User:\n"
+            "{prompt}\n\n"
+            "### Assistant:\n"
         )
         stop_tokens = ([tokenizer.eos_id],)
         return system_prompt, stop_tokens
