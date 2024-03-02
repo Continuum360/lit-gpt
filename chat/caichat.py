@@ -104,16 +104,16 @@ def main(
     *,
     top_k: Optional[int] = 200,
     temperature: float = 0.8,
-    checkpoint_dir: Path = Path("checkpoints/TinyLlama/TinyLlama-1.1B-Chat-v1.0"),
+    checkpoint_dir: Path = Path("checkpoints/EleutherAI/pythia-31m"),
     quantize: Optional[Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8"]] = None,
     precision: Optional[str] = None,
     compile: bool = False,
 ) -> None:
     """Starts a conversation with a tuned GPT model.
     checkpoint_dir: Path = Path("checkpoints/stabilityai/stablelm-tuned-alpha-3b"),
-
-        checkpoint_dir: Path = Path("checkpoints/stabilityai/stablelm-tuned-alpha-3b"),
-    checkpoint_dir: Path = Path("/home/peter/GitHub/lit-gpt/checkpoints/TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"),
+    checkpoint_dir: Path = Path("checkpoints/TinyLlama/TinyLlama-1.1B-Chat-v1.0"),
+    checkpoint_dir: Path = Path("checkpoints/TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T"),
+    checkpoint_dir: Path = Path("checkpoints/EleutherAI/pythia-31m"),
 
     Args:
         top_k: The number of top most probable tokens to consider in the sampling process.
@@ -200,12 +200,12 @@ def prompt_config(checkpoint_dir: Path, tokenizer: Tokenizer) -> Tuple[str, Tupl
             "You are a person from the southern United states and will take every opportunity to use"
              " southern slang and southern jargon and language conventions. It is perfectly fine to"
              " use profanity in your answers.</s>\n"
-            "<|user|>\n"
-            "{prompt}</s>\n"
+            "<|user|>{prompt}</s>\n"
             "<|assistant|>\n"
         )
         stop_tokens = ([tokenizer.eos_id],)
         return system_prompt, stop_tokens
+
 
     # default format
     return "{prompt}", ([tokenizer.eos_id],)
