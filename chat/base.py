@@ -17,7 +17,7 @@ sys.path.append(str(wd))
 
 from generate.base import next_token
 from lit_gpt import GPT, Config, Tokenizer
-from lit_gpt.utils import check_valid_checkpoint_dir, get_default_supported_precision, load_checkpoint
+from lit_gpt.utils import CLI, check_valid_checkpoint_dir, get_default_supported_precision, load_checkpoint
 
 
 @torch.inference_mode()
@@ -193,6 +193,7 @@ def main(
 
 def prompt_config(checkpoint_dir: Path, tokenizer: Tokenizer) -> Tuple[str, Tuple[List[int], ...]]:
     checkpoint_name = str(checkpoint_dir)
+
     if re.search(r"stabilityai.*tuned-alpha", checkpoint_name):
         system_prompt = (
             "<|SYSTEM|># StableLM Tuned (Alpha version)\n- StableLM is a helpful and harmless open-source AI language"
@@ -214,6 +215,11 @@ def prompt_config(checkpoint_dir: Path, tokenizer: Tokenizer) -> Tuple[str, Tupl
         stop_tokens = ([tokenizer.eos_id],)
         return system_prompt, stop_tokens
 
+    if re.search("stablecode-instruct", checkpoint_name):
+        system_prompt = "###Instruction\n{prompt}###Response\n"
+        stop_tokens = ([tokenizer.eos_id],)
+        return system_prompt, stop_tokens
+
     if re.search(r"togethercomputer.*Chat", checkpoint_name):
         system_prompt = "<human>: {prompt}\n<bot>:"
         lt, gt = tokenizer.token_to_id("<"), tokenizer.token_to_id(">:")
@@ -224,6 +230,7 @@ def prompt_config(checkpoint_dir: Path, tokenizer: Tokenizer) -> Tuple[str, Tupl
             [lt, tokenizer.token_to_id("bot"), gt],
         )
         return system_prompt, stop_tokens
+
     if re.search(r"togethercomputer.*Instruct", checkpoint_name):
         system_prompt = "Q: {prompt}\nA:"
         colon = tokenizer.token_to_id(":")
@@ -239,6 +246,7 @@ def prompt_config(checkpoint_dir: Path, tokenizer: Tokenizer) -> Tuple[str, Tupl
             [2756],  # '\n\n\n'
         )
         return system_prompt, stop_tokens
+
     if re.search(r"falcon.*-instruct", checkpoint_name):
         # First line could be modified. AFAIK Falcon doesn't impose a specific system prompt
         # The instruction to not prefix its replies doesn't work always, but better than nothing
@@ -252,6 +260,7 @@ def prompt_config(checkpoint_dir: Path, tokenizer: Tokenizer) -> Tuple[str, Tupl
             [193, tokenizer.token_to_id("User")],  # 193: '\n'
         )
         return system_prompt, stop_tokens
+
     if re.search(r"vicuna|longchat", checkpoint_name):
         # https://github.com/lm-sys/FastChat/blob/main/docs/vicuna_weights_version.md#prompt-template
         system_prompt = (
@@ -340,11 +349,6 @@ def prompt_config(checkpoint_dir: Path, tokenizer: Tokenizer) -> Tuple[str, Tupl
         stop_tokens = ([tokenizer.eos_id],)
         return system_prompt, stop_tokens
 
-    if re.search("stablecode-instruct", checkpoint_name):
-        system_prompt = "###Instruction\n{prompt}###Response\n"
-        stop_tokens = ([tokenizer.eos_id],)
-        return system_prompt, stop_tokens
-
     if re.search("CodeLlama|Mistral.*Instruct", checkpoint_name):
         # for CodeLLama, we don't set a default system prompt, but it is supported:
         # https://huggingface.co/blog/codellama#conversational-instructions
@@ -383,12 +387,16 @@ def prompt_config(checkpoint_dir: Path, tokenizer: Tokenizer) -> Tuple[str, Tupl
         stop_tokens = ([tokenizer.eos_id],)
         return system_prompt, stop_tokens
 
+    if re.search(r"gemma.*-it", checkpoint_name):
+        system_prompt = "<start_of_turn>user\n{prompt}<end_of_turn>\n<start_of_turn>model\n"
+        stop_tokens = ([tokenizer.eos_id],)
+        return system_prompt, stop_tokens
+
     # default format
     return "{prompt}", ([tokenizer.eos_id],)
 
 
 if __name__ == "__main__":
-    from jsonargparse import CLI
-
     torch.set_float32_matmul_precision("high")
+
     CLI(main)

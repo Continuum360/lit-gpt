@@ -12,6 +12,8 @@ from lightning_utilities.core.imports import RequirementCache
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
+from lit_gpt.utils import CLI
+
 _SAFETENSORS_AVAILABLE = RequirementCache("safetensors")
 _HF_TRANSFER_AVAILABLE = RequirementCache("hf_transfer")
 
@@ -40,7 +42,7 @@ def download_from_hub(
             " https://huggingface.co/settings/tokens"
         )
 
-    download_files = ["tokenizer*", "generation_config.json"]
+    download_files = ["tokenizer*", "generation_config.json", "config.json"]
     if not tokenizer_only:
         if from_safetensors:
             if not _SAFETENSORS_AVAILABLE:
@@ -92,6 +94,4 @@ def download_from_hub(
 
 
 if __name__ == "__main__":
-    from jsonargparse import CLI
-
     CLI(download_from_hub)
