@@ -18,13 +18,13 @@ from torch.utils.data import DataLoader, IterableDataset
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-from lit_gpt import Config
+from lit_gpt import Config, Tokenizer
 from lit_gpt.model import GPT, Block
 from lit_gpt.utils import chunked_cross_entropy, estimate_flops, get_default_supported_precision, num_parameters
 
-model_name = "pythia-31m" # pythia-14m # pythia-70m
+model_name = "pythia-31m" # pythia-14m # pythia-31m # pythia-70m
 name = "openwebtext"
-out_dir = Path("out") / name
+out_dir = Path("out") / model_name
 data_dir = Path("data") / name
 save_interval = 20
 eval_interval = 20
@@ -33,8 +33,8 @@ log_interval = 10
 
 # Hyperparameters
 learning_rate = 6e-4
-batch_size = 6 #125
-micro_batch_size = 2 # 5
+batch_size = 8 # 8 #125
+micro_batch_size = 2 # 2 # 5
 gradient_accumulation_steps = batch_size // micro_batch_size
 assert gradient_accumulation_steps > 0
 max_iters = 600000  # num_epochs * (epoch_size // micro_batch_size) // devices
@@ -75,6 +75,9 @@ def main(fabric: L.Fabric, resume: Union[bool, Path]) -> None:
     if fabric.global_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    # checkpoint_dir: Path = Path("checkpoints/EleutherAI/pythia-31m"),
+    # tokenizer = Tokenizer(checkpoint_dir)
+
     fabric.seed_everything(1337, workers=True)  # same seed for every process to init model (FSDP)
 
     config = Config.from_name(model_name)
@@ -94,8 +97,8 @@ def main(fabric: L.Fabric, resume: Union[bool, Path]) -> None:
     optimizer = fabric.setup_optimizers(optimizer)
 
     train_data, val_data = load_datasets(data_dir, max_seq_length=model.max_seq_length)
-    train_dataloader = DataLoader(train_data, batch_size=micro_batch_size, num_workers=2)
-    val_dataloader = DataLoader(val_data, batch_size=micro_batch_size, num_workers=2)
+    train_dataloader = DataLoader(train_data, batch_size=micro_batch_size, num_workers=4)
+    val_dataloader = DataLoader(val_data, batch_size=micro_batch_size, num_workers=4)
     train_dataloader, val_dataloader = fabric.setup_dataloaders(train_dataloader, val_dataloader)
 
     state = {"model": model, "optimizer": optimizer, "hparams": hparams, "iter_num": 0, "step_count": 0}
@@ -105,7 +108,7 @@ def main(fabric: L.Fabric, resume: Union[bool, Path]) -> None:
     if resume:
         fabric.print(f"Resuming training from {resume}")
         fabric.load(resume, state)
-
+    
     train_time = time.perf_counter()
     train(fabric, state, train_dataloader, val_dataloader)
     fabric.print(f"Training time: {(time.perf_counter()-train_time):.2f}s")
