@@ -23,18 +23,18 @@ from lit_gpt.model import GPT, Block
 from lit_gpt.utils import chunked_cross_entropy, estimate_flops, get_default_supported_precision, num_parameters
 
 model_name = "pythia-31m" # pythia-14m # pythia-31m # pythia-70m
-name = "openwebtext"
+name = "cosmos"
 out_dir = Path("out") / model_name
 data_dir = Path("data") / name
-save_interval = 20
-eval_interval = 20
-eval_iters = 10
+save_interval = 100
+eval_interval = 100
+eval_iters = 20
 log_interval = 10
 
 # Hyperparameters
 learning_rate = 6e-4
-batch_size = 8 # 8 #125
-micro_batch_size = 2 # 2 # 5
+batch_size = 6 #125
+micro_batch_size = 2 # 5
 gradient_accumulation_steps = batch_size // micro_batch_size
 assert gradient_accumulation_steps > 0
 max_iters = 600000  # num_epochs * (epoch_size // micro_batch_size) // devices
