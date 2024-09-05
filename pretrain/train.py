@@ -22,7 +22,7 @@ from lit_gpt import Config, Tokenizer
 from lit_gpt.model import GPT, Block
 from lit_gpt.utils import chunked_cross_entropy, estimate_flops, get_default_supported_precision, num_parameters
 
-model_name = "pythia-31m" # pythia-14m # pythia-31m # pythia-70m
+model_name = "pythia-14m" # pythia-14m # pythia-31m # pythia-70m
 name = "cosmos"
 out_dir = Path("out") / model_name
 data_dir = Path("data") / name
