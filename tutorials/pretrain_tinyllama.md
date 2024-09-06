@@ -5,6 +5,7 @@ This tutorial will walk you through pretraining [TinyLlama](https://github.com/j
 > [!TIP]
 > To get started with zero setup, clone the [TinyLlama studio on Lightning AI](https://lightning.ai/lightning-ai/studios/llm-pretrain-tinyllama-1-1b).
 
+&nbsp;
 ## What's TinyLlama?
 
 [TinyLlama](https://github.com/jzhang38/TinyLlama/) is architecturally the same as Meta AI's LLama 2, but only has 1.1B parameters and is instead trained on multiple epochs on a mix of [SlimPajama](https://huggingface.co/datasets/cerebras/SlimPajama-627B) and [Starcoder](https://huggingface.co/datasets/bigcode/starcoderdata) datasets.
@@ -26,6 +27,7 @@ Here is a quick fact sheet:
 
 (this table was sourced from the author's [README](https://github.com/jzhang38/TinyLlama/))
 
+&nbsp;
 ## Download datasets
 
 You can download the data using git lfs:
@@ -42,21 +44,21 @@ git clone https://huggingface.co/datasets/bigcode/starcoderdata data/starcoderda
 
 Around 1.2 TB of disk space is required to store both datasets.
 
+&nbsp;
 ## Prepare the datasets for training
 
-In order to start pretraining lit-gpt on it, you need to read, tokenize, and write the data in binary chunks. This will leverage our `lightning.data` optimization pipeline and streaming dataset that comes with Lightning.
+In order to start pretraining litgpt on it, you need to read, tokenize, and write the data in binary chunks. This will leverage the `litdata` optimization pipeline and streaming dataset.
 
 First, install additional dependencies for preprocessing:
 
 ```bash
-pip install 'lightning[data]' torchmetrics tensorboard sentencepiece zstandard pandas pyarrow 'huggingface_hub[hf_transfer] @ git+https://github.com/huggingface/huggingface_hub'
+pip install '.[all]'
 ```
 
 You will need to have the tokenizer config available:
 
 ```bash
-python scripts/download.py \
-   --repo_id meta-llama/Llama-2-7b-hf \
+litgpt download meta-llama/Llama-2-7b-hf \
    --access_token your_hf_token \
    --tokenizer_only true
 ```
@@ -67,7 +69,7 @@ You will require **1.1 TB** of disk space for Starcoder and **2.5** TB of space 
 **Starcoder:**
 
 ```bash
-python scripts/prepare_starcoder.py \
+python litgpt/data/prepare_starcoder.py \
   --input_dir data/starcoderdata-raw \
   --output_dir data/starcoder \
   --tokenizer_path checkpoints/meta-llama/Llama-2-7b-hf
@@ -76,17 +78,17 @@ python scripts/prepare_starcoder.py \
 **SlimPajama:**
 
 ```bash
-python scripts/prepare_slimpajama.py \
+python litgpt/data/prepare_slimpajama.py \
   --input_dir data/slimpajama-raw/validation \
   --output_dir data/slimpajama/val \
   --tokenizer_path checkpoints/meta-llama/Llama-2-7b-hf
 
-python scripts/prepare_slimpajama.py \
+python litgpt/data/prepare_slimpajama.py \
   --input_dir data/slimpajama-raw/test \
   --output_dir data/slimpajama/test \
   --tokenizer_path checkpoints/meta-llama/Llama-2-7b-hf
 
-python scripts/prepare_slimpajama.py \
+python litgpt/data/prepare_slimpajama.py \
   --input_dir data/slimpajama-raw/train \
   --output_dir data/slimpajama/train \
   --tokenizer_path checkpoints/meta-llama/Llama-2-7b-hf
@@ -95,30 +97,33 @@ python scripts/prepare_slimpajama.py \
 If you want to run on a small slice of the datasets first, pass the flag `--fast_dev_run=true` to the commands above.
 In the above we are assuming that you will be using the same tokenizer as used in LlaMA/TinyLlama, but any trained [SentencePiece](https://github.com/google/sentencepiece) tokenizer with a 32000 vocabulary size will do here.
 
+&nbsp;
 ## Pretraining
 
 Running the pretraining script with its default settings requires at least 8 A100 GPUs.
 
 ```bash
-python pretrain/tinyllama.py
+litgpt pretrain --config config_hub/pretrain/tinyllama.yaml
 ```
+
+&nbsp;
+> [!TIP]
+> Use the `litgpt pretrain --data.help TinyLlama` command to list additional dataset options.
+&nbsp;
+
 
 The script will save checkpoints periodically to the folder `out/`.
-By default, the `pretrain/tinyllama.py` script will pretrain the model with FSDP in
+By default, the `pretrain` script will pretrain the model with FSDP in
 `bfloat16` mixed precision and gradient accumulation.
 
-Note that the `pretrain/tinyllama.py` is not actually a model-specific training script, so feel free to change
-the configuration and size by passing a different string to the model name argument, for example:
+Note that `pretrain` is not actually a model-specific training script, so feel free [try other configurations](../config_hub)
+or change the model type and size by passing a different string to the model name argument, for example:
 
 ```shell
-python pretrain/tinyllama.py --model.name Gemma-2b
+litgpt pretrain Gemma-2b
 ```
 
-The currently supported model names are contained in the [config.py](https://github.com/Lightning-AI/lit-gpt/lit_gpt/config.py) file.
-You can
-
-1) either search this file for lines containing "name =",
-2) or run `python scripts/download.py` without additional command line arguments
+The currently supported model names can be listed by executing `litgpt pretrain` without any additional arguments.
 
 Keep in mind that training with a single machine will take weeks. To speed up the process, you'll need access to a cluster.
 Once you're in a cluster, you can follow [these instructions](https://lightning.ai/docs/fabric/stable/fundamentals/launch.html#launch-on-a-cluster)
@@ -136,34 +141,42 @@ GPU memory. For more tips to avoid out-of-memory issues, please also see the mor
 [Dealing with out-of-memory (OOM) errors](oom.md) guide.
 
 Last, logging is kept minimal in the script, but for long-running experiments we recommend switching to a proper experiment tracker.
-As an example, we included WandB (set `use_wandb=True`) to show how you can integrate any experiment tracking framework.
+As an example, we included WandB (set `--logger_name=wandb`) to show how you can integrate any experiment tracking framework.
 For reference, [here are the loss curves for our reproduction](https://api.wandb.ai/links/awaelchli/y7pzdpwy).
 
+&nbsp;
 ## Resume training
 
 The checkpoints saved during pretraining contain all the information to resume if needed.
-Simply rerun the script with the `--resume` argument:
+Simply rerun the script with the `--resume` argument added:
 
 ```bash
-python pretrain/tinyllama.py --resume out/tiny-llama-1.1b/step-00060500.pth
+litgpt pretrain tiny-llama\
+  --config config_hub/pretrain/tinyllama.yaml \
+  --resume out/pretrain/tiny-llama/step-00060500
 ```
+**Important:** Each checkpoint is a directory. Point to the directory, not the 'lit_model.pth' file inside of it.
 
+&nbsp;
+> [!TIP]
+> Use the `litgpt pretrain --data.help TinyLlama` command to list additional dataset options.
+&nbsp;
+
+
+&nbsp;
 ## Export checkpoints
 
 After training is completed, you can convert the checkpoint to a format that can be loaded for evaluation, inference, finetuning etc.
 
 ```bash
-python scripts/convert_pretrained_checkpoint.py \
-  --checkpoint_file out/tiny-llama-1.1b/step-00060500.pth \
-  --tokenizer_dir checkpoints/meta-llama/Llama-2-7b-hf \
-  --config_name tiny-llama-1.1b \
-  --output_dir checkpoints/lit-tiny-llama-1.1b
+litgpt convert_pretrained_checkpoint out/pretrain/tiny-llama/step-00060500 \
+  --output_dir checkpoints/tiny-llama/final
 ```
 
 After conversion, the output folder will contain these files:
 ```
-checkpoints/lit-tiny-llama-1.1b
-├── lit_config.json
+checkpoints/tiny-llama/final
+├── model_config.yaml
 ├── lit_model.pth
 ├── tokenizer_config.json
 ├── tokenizer.json
@@ -171,3 +184,16 @@ checkpoints/lit-tiny-llama-1.1b
 ```
 
 You can then use this checkpoint folder to run [evaluation](evaluation.md), [inference](inference.md), [finetuning](finetune_lora.md) or [process the checkpoint further](convert_lit_models.md).
+
+
+&nbsp;
+## Project templates
+
+The following [Lightning Studio](https://lightning.ai/lightning-ai/studios) templates provide LitGPT pretraining projects in reproducible environments with multi-GPU and multi-node support:
+&nbsp;
+
+|                                                                                                                                                                                                                                                                                                                                             |                                                                                                                                                                                                                                                                                                                                                |
+|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| <p align="left">[Prepare the TinyLlama 1T token dataset](https://lightning.ai/lightning-ai/studios/prepare-the-tinyllama-1t-token-dataset) <br> [<img src="https://pl-public-data.s3.amazonaws.com/assets_litgpt/readme/3.webp" width="300"></p>](https://lightning.ai/lightning-ai/studios/prepare-the-tinyllama-1t-token-dataset)         | [Pretrain LLMs - TinyLlama 1.1B](https://lightning.ai/lightning-ai/studios/pretrain-llms-tinyllama-1-1b) <br> <p align="left">[<img src="https://pl-public-data.s3.amazonaws.com/assets_litgpt/readme/4.webp" width="300"></p>](https://lightning.ai/lightning-ai/studios/pretrain-llms-tinyllama-1-1b)                                        |
+| [Continued Pretraining with TinyLlama 1.1B](https://lightning.ai/lightning-ai/studios/continued-pretraining-with-tinyllama-1-1b) <br> <p align="left">[<img src="https://pl-public-data.s3.amazonaws.com/assets_litgpt/readme/1.webp" width="300"></p>](https://lightning.ai/lightning-ai/studios/continued-pretraining-with-tinyllama-1-1b) | |
+|                                                                                                                                                                                                                                                                                                                                             |

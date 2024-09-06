@@ -1,21 +1,42 @@
 # Copyright Lightning AI. Licensed under the Apache License 2.0, see LICENSE file.
 
-import sys
+from copy import deepcopy
 from functools import partial
-from pathlib import Path
-from urllib.request import urlretrieve
 
 import pytest
 import torch
-from conftest import RunIf
 from lightning import Fabric
 from lightning.fabric.utilities.imports import _IS_WINDOWS
+from lightning.fabric.utilities.init import _materialize_meta_tensors
+from torch._dynamo.backends import debugging
+from torch.backends.cuda import (
+    SDPAParams,
+    SDPBackend,
+    can_use_efficient_attention,
+    can_use_flash_attention,
+    flash_sdp_enabled,
+    math_sdp_enabled,
+    mem_efficient_sdp_enabled,
+)
+from transformers import AutoConfig, AutoModelForCausalLM
+from transformers.models.falcon import FalconConfig, FalconForCausalLM
+from transformers.models.gemma import GemmaConfig, GemmaForCausalLM
+from transformers.models.gemma2 import Gemma2Config, Gemma2ForCausalLM
+from transformers.models.gpt_neox import GPTNeoXConfig, GPTNeoXForCausalLM
+from transformers.models.llama import LlamaConfig, LlamaForCausalLM
+from transformers.models.mistral import MistralConfig, MistralForCausalLM
+from transformers.models.mixtral import MixtralConfig, MixtralForCausalLM
 
-# support running without installing as a package
-wd = Path(__file__).parent.parent.resolve()
-sys.path.append(str(wd))
-
-import lit_gpt.config as config_module
+import litgpt.config as config_module
+from litgpt import GPT, Config
+from litgpt.scripts.convert_hf_checkpoint import (
+    copy_weights_falcon,
+    copy_weights_gemma_2,
+    copy_weights_gpt_neox,
+    copy_weights_hf_llama,
+    copy_weights_phi,
+)
+from tests.conftest import RunIf
 
 
 @torch.inference_mode()
@@ -40,11 +61,6 @@ import lit_gpt.config as config_module
     ],
 )
 def test_against_gpt_neox_model(rotary_pct, batch_size, n_embd, parallel_residual, device, dtype) -> None:
-    from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_gpt_neox
-
     torch.set_default_dtype(dtype)
 
     ours_config = Config(
@@ -70,6 +86,7 @@ def test_against_gpt_neox_model(rotary_pct, batch_size, n_embd, parallel_residua
         rotary_pct=ours_config.rotary_percentage,
         vocab_size=ours_config.padded_vocab_size,
         use_parallel_residual=ours_config.parallel_residual,
+        attn_implementation="eager",
     )
 
     state_dict = {}
@@ -113,11 +130,6 @@ def test_against_gpt_neox_model(rotary_pct, batch_size, n_embd, parallel_residua
     ],
 )
 def test_against_hf_falcon(kwargs, device, dtype):
-    from transformers.models.falcon import FalconConfig, FalconForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_falcon
-
     torch.set_default_dtype(dtype)
 
     ours_config = Config.from_name(**kwargs)
@@ -164,12 +176,6 @@ def test_against_hf_falcon(kwargs, device, dtype):
     ],
 )
 def test_against_original_open_llama_3b(device, dtype):
-    from transformers.models.llama.configuration_llama import LlamaConfig
-    from transformers.models.llama.modeling_llama import LlamaForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_hf_llama
-
     torch.set_default_dtype(dtype)
 
     ours_config = Config.from_name("open_llama_3b", n_layer=2, n_head=8, n_embd=32, intermediate_size=86)
@@ -201,7 +207,16 @@ def test_against_original_open_llama_3b(device, dtype):
 @torch.inference_mode()
 @pytest.mark.parametrize(
     "ours_kwargs",
-    [{"name": "Llama-2-7b-hf"}, {"name": "CodeLlama-7b-hf"}, {"name": "Llama-2-70b-chat-hf", "n_query_groups": 1}],
+    [
+        {"name": "Llama-2-7b-hf"},
+        {"name": "CodeLlama-7b-hf"},
+        {"name": "Llama-2-70b-chat-hf", "n_query_groups": 1},
+        {"name": "Llama-3-8B"},
+        {"name": "Llama-3-8B-Instruct"},
+        {"name": "Llama-3.1-405B", "n_query_groups": 4},
+        {"name": "Llama-3.1-8B"},
+        {"name": "Llama-3.1-8B-Instruct"},
+    ],
 )
 @pytest.mark.parametrize(
     ("device", "dtype"),
@@ -219,13 +234,7 @@ def test_against_original_open_llama_3b(device, dtype):
         ),
     ],
 )
-def test_against_hf_llama2(ours_kwargs, device, dtype):
-    from transformers.models.llama.configuration_llama import LlamaConfig
-    from transformers.models.llama.modeling_llama import LlamaForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_hf_llama
-
+def test_against_hf_llama_2_and_3(ours_kwargs, device, dtype):
     torch.set_default_dtype(dtype)
 
     ours_config = Config.from_name(
@@ -262,6 +271,7 @@ def test_against_hf_llama2(ours_kwargs, device, dtype):
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("model_name", ("phi-1_5", "phi-2"))
 @pytest.mark.parametrize(
     ("device", "dtype"),
     [
@@ -273,28 +283,14 @@ def test_against_hf_llama2(ours_kwargs, device, dtype):
         ),
     ],
 )
-def test_against_hf_phi_1_5(device, dtype):
-    workdir = wd / "tests" / "reference_models"
-    workdir.mkdir(parents=True, exist_ok=True)
-    file_paths = [workdir / "original_phi_1_5.py", workdir / "configuration_phi.py"]
-    urls = [
-        "https://huggingface.co/microsoft/phi-1_5/raw/main/modeling_phi.py",
-        "https://huggingface.co/microsoft/phi-1_5/raw/main/configuration_phi.py",
-    ]
-    for file_path, url in zip(file_paths, urls):
-        if not file_path.is_file():
-            urlretrieve(url=url, filename=file_path)
-
-    from reference_models.configuration_phi import PhiConfig
-    from reference_models.original_phi_1_5 import PhiForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_phi
+def test_against_hf_phi(model_name, device, dtype):
+    from transformers.models.phi.configuration_phi import PhiConfig
+    from transformers.models.phi.modeling_phi import PhiForCausalLM
 
     torch.set_default_dtype(dtype)
 
     ours_config = Config.from_name(
-        "phi-1_5", padded_vocab_size=10000, n_layer=2, n_head=4, n_embd=256, rotary_percentage=0.5
+        model_name, padded_vocab_size=10000, n_layer=2, n_head=4, n_embd=256, rotary_percentage=0.5
     )
     T = 5
     theirs_config = PhiConfig(
@@ -324,6 +320,7 @@ def test_against_hf_phi_1_5(device, dtype):
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("model_name", ("Phi-3-mini-4k-instruct", "Phi-3.5-mini-instruct"))
 @pytest.mark.parametrize(
     ("device", "dtype"),
     [
@@ -335,42 +332,38 @@ def test_against_hf_phi_1_5(device, dtype):
         ),
     ],
 )
-def test_against_hf_phi_2(device, dtype):
-    workdir = wd / "tests" / "reference_models"
-    workdir.mkdir(parents=True, exist_ok=True)
-    file_paths = [workdir / "original_phi_2.py", workdir / "configuration_phi.py"]
-    urls = [
-        "https://huggingface.co/microsoft/phi-2/raw/main/modeling_phi.py",
-        "https://huggingface.co/microsoft/phi-2/raw/main/configuration_phi.py",
-    ]
-    for file_path, url in zip(file_paths, urls):
-        if not file_path.is_file():
-            urlretrieve(url=url, filename=file_path)
-
-    from reference_models.configuration_phi import PhiConfig
-    from reference_models.original_phi_2 import PhiForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_phi
+def test_against_hf_phi_3(model_name, device, dtype):
+    from transformers.models.phi3.configuration_phi3 import Phi3Config
+    from transformers.models.phi3.modeling_phi3 import Phi3ForCausalLM
 
     torch.set_default_dtype(dtype)
 
     ours_config = Config.from_name(
-        "phi-2", padded_vocab_size=10000, n_layer=2, n_head=4, n_embd=256, rotary_percentage=0.5
+        model_name,
+        padded_vocab_size=10000,
+        n_layer=2,
+        n_head=4,
+        n_embd=256,
     )
     T = 5
-    theirs_config = PhiConfig(
-        vocab_size=ours_config.padded_vocab_size,
-        max_position_embeddings=ours_config.block_size,
+    theirs_config = Phi3Config(
+        attention_bias=ours_config.bias,
+        head_dim=ours_config.head_size,
         hidden_size=ours_config.n_embd,
         intermediate_size=ours_config.intermediate_size,
+        max_position_embeddings=T,
         num_attention_heads=ours_config.n_head,
         num_hidden_layers=ours_config.n_layer,
+        num_key_value_heads=ours_config.n_query_groups,
+        pad_token_id=ours_config.padded_vocab_size - 1,
         partial_rotary_factor=ours_config.rotary_percentage,
+        rms_norm_eps=ours_config.norm_eps,
+        rope_theta=ours_config.rope_base,
         torch_dtype=dtype,
+        vocab_size=ours_config.padded_vocab_size,
     )
 
-    theirs_model = PhiForCausalLM(theirs_config).to(device)
+    theirs_model = Phi3ForCausalLM(theirs_config).to(device)
     theirs_state_dict = theirs_model.state_dict()
     state_dict = {}
     copy_weights_phi(ours_config, {}, state_dict, theirs_state_dict)
@@ -402,17 +395,12 @@ def test_against_hf_phi_2(device, dtype):
         ),
     ],
 )
-def test_against_hf_mistral(device, dtype):
-    from transformers.models.mistral.configuration_mistral import MistralConfig
-    from transformers.models.mistral.modeling_mistral import MistralForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_hf_llama
-
+@pytest.mark.parametrize("model_name", ["Mistral-7B-Instruct-v0.1", "Mathstral-7B-v0.1"])
+def test_against_mistral_hf_models(device, dtype, model_name):
     torch.set_default_dtype(dtype)
 
     ours_config = Config.from_name(
-        "Mistral-7B-Instruct-v0.1",
+        model_name,
         padded_vocab_size=10000,
         n_layer=2,
         n_embd=32,
@@ -420,6 +408,7 @@ def test_against_hf_mistral(device, dtype):
         n_query_groups=2,
         intermediate_size=86,
     )
+
     T = 5
     theirs_config = MistralConfig(
         vocab_size=ours_config.padded_vocab_size,
@@ -432,6 +421,7 @@ def test_against_hf_mistral(device, dtype):
         num_key_value_heads=ours_config.n_query_groups,
         rope_theta=ours_config.rope_base,
     )
+
     assert ours_config.intermediate_size == theirs_config.intermediate_size
 
     theirs_model = MistralForCausalLM(theirs_config).to(device)
@@ -451,11 +441,6 @@ def test_against_hf_mistral(device, dtype):
 
 @torch.inference_mode()
 def test_against_hf_mixtral():
-    from transformers.models.mixtral import MixtralConfig, MixtralForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_hf_llama
-
     device = torch.device("cpu")
     dtype = torch.float32
     ours_config = Config.from_name(
@@ -516,11 +501,6 @@ def test_against_hf_mixtral():
     ],
 )
 def test_against_original_stablelm_zephyr_3b(device, dtype):
-    from transformers import AutoConfig, AutoModelForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_hf_llama
-
     torch.set_default_dtype(dtype)
 
     T = 5
@@ -572,12 +552,6 @@ def test_against_original_stablelm_zephyr_3b(device, dtype):
     ],
 )
 def test_against_original_gemma(model_name, device, dtype):
-    from transformers.models.gemma.configuration_gemma import GemmaConfig
-    from transformers.models.gemma.modeling_gemma import GemmaForCausalLM
-
-    from lit_gpt import GPT, Config
-    from scripts.convert_hf_checkpoint import copy_weights_hf_llama
-
     torch.set_default_dtype(dtype)
 
     T = 5
@@ -595,6 +569,7 @@ def test_against_original_gemma(model_name, device, dtype):
         rope_theta=ours_config.rope_base,
         attention_bias=ours_config.bias,
         tie_word_embeddings=True,
+        hidden_act="gelu_pytorch_tanh",
     )
     assert ours_config.intermediate_size == theirs_config.intermediate_size
 
@@ -615,15 +590,81 @@ def test_against_original_gemma(model_name, device, dtype):
     torch.testing.assert_close(ours_y, theirs_y)
 
 
+@torch.inference_mode()
+@pytest.mark.parametrize("model_name", ("gemma-2-9b", "gemma-2-27b"))
+@pytest.mark.parametrize(
+    ("device", "dtype"),
+    [
+        (torch.device("cpu"), torch.float32),
+        pytest.param(
+            torch.device("cuda"),
+            torch.float16,
+            marks=[
+                # the reference does softmax upscaled to fp32 during attention. additionally, the final layernorm input
+                # is slightly different
+                pytest.mark.xfail(raises=AssertionError, strict=False),
+                RunIf(min_cuda_gpus=1),
+            ],
+        ),
+    ],
+)
+def test_against_original_gemma_2(model_name, device, dtype):
+    torch.set_default_dtype(dtype)
+
+    T = 20
+    ours_config = Config.from_name(
+        model_name,
+        block_size=T,
+        sliding_window_size=T // 2,
+        n_layer=2,
+        n_head=16,
+        n_embd=32,
+        intermediate_size=86,
+    )
+    theirs_config = Gemma2Config(
+        vocab_size=ours_config.padded_vocab_size,
+        hidden_size=ours_config.n_embd,
+        head_dim=ours_config.head_size,
+        num_attention_heads=ours_config.n_head,
+        num_hidden_layers=ours_config.n_layer,
+        intermediate_size=ours_config.intermediate_size,
+        max_position_embeddings=ours_config.block_size,
+        sliding_window=ours_config.sliding_window_size,
+        rms_norm_eps=ours_config.norm_eps,
+        num_key_value_heads=ours_config.n_query_groups,
+        rope_theta=ours_config.rope_base,
+        attention_bias=ours_config.bias,
+        tie_word_embeddings=True,
+        hidden_act="gelu_pytorch_tanh",
+        attn_logit_softcapping=ours_config.attention_logit_softcapping,
+        final_logit_softcapping=ours_config.final_logit_softcapping,
+        initializer_range=1.0,  # to make the affect of attention_logit_softcapping more prominent
+        attn_implementation="eager",
+        query_pre_attn_scalar=ours_config.attention_scores_scalar,
+    )
+
+    theirs_model = Gemma2ForCausalLM(theirs_config).to(device)
+    theirs_state_dict = theirs_model.state_dict()
+    # Gemma weights are shipped without `lm_head.weight`
+    theirs_state_dict.pop("lm_head.weight")
+    state_dict = {}
+    copy_weights_gemma_2(ours_config, {}, state_dict, theirs_state_dict)
+    ours_model = GPT(ours_config).to(device)
+    ours_model.load_state_dict(state_dict)
+
+    # test end to end
+    x = torch.randint(low=0, high=ours_config.padded_vocab_size, size=(T,), device=device).unsqueeze(0)
+    assert x.size(1) == T
+    ours_y = ours_model(x)
+    theirs_y = theirs_model(x)["logits"].to(dtype)  # HF converts logits to float
+    torch.testing.assert_close(ours_y, theirs_y)
+
+
 @RunIf(dynamo=True)
 @torch.inference_mode()
 def test_model_compile():
-    from lit_gpt import GPT
-
     model = GPT.from_name("pythia-14m", n_layer=3)
     x = torch.randint(model.config.vocab_size, size=(2, model.config.block_size), dtype=torch.int64)
-
-    from torch._dynamo.backends import debugging
 
     explanation = torch._dynamo.explain(model)(x)
     assert isinstance(explanation, debugging.ExplainOutput)
@@ -645,8 +686,6 @@ def test_model_compile():
 )
 @pytest.mark.flaky(reruns=5)
 def test_kv_cache(max_seq_length):
-    from lit_gpt import GPT, Config
-
     config = Config(block_size=25, padded_vocab_size=5, n_layer=2, n_head=2, n_embd=8)
     model = GPT(config)
     idx = torch.randint(0, model.config.padded_vocab_size, (1, 5))
@@ -678,8 +717,6 @@ def test_kv_cache(max_seq_length):
 
 @torch.inference_mode()
 def test_model_kv_cache_amp():
-    from lit_gpt.model import GPT, Config
-
     config = Config.from_name("pythia-14m", n_layer=2)
     model = GPT(config)
     encoded = torch.arange(45)
@@ -696,25 +733,20 @@ SUPPORTS_FLASH_ATTENTION = (
 
 
 @RunIf(min_cuda_gpus=1)
-@pytest.mark.parametrize("config", config_module.configs, ids=[c["name"] for c in config_module.configs])
+@pytest.mark.parametrize("config", deepcopy(config_module.configs), ids=[c["name"] for c in config_module.configs])
 @torch.inference_mode()
 def test_sdpa_choice(config):
-    from torch.backends.cuda import (
-        SDPAParams,
-        SDPBackend,
-        can_use_efficient_attention,
-        can_use_flash_attention,
-        flash_sdp_enabled,
-        math_sdp_enabled,
-        mem_efficient_sdp_enabled,
-    )
-
-    from lit_gpt import GPT
+    if config["name"].startswith("Gemma-2-"):
+        pytest.skip("Gemma 2 doesn't support SDPA")
 
     torch.set_default_dtype(torch.float16)
 
     def assert_sdpa_backend(original_fn, q, k, v, mask):
-        params = SDPAParams(q, k, v, mask, 0.0, True)
+        # SDPAParams gained an additional argument in PyTorch 2.5
+        args = []
+        if hasattr(SDPAParams, "enable_gqa"):
+            args.append(False)
+        params = SDPAParams(q, k, v, mask, 0.0, True, *args)
         if expected is SDPBackend.FLASH_ATTENTION:
             assert flash_sdp_enabled()
             assert can_use_flash_attention(params, True)
@@ -752,25 +784,17 @@ def test_sdpa_choice(config):
 
 
 @RunIf(min_cuda_gpus=1)
-@pytest.mark.parametrize("config", config_module.configs, ids=[c["name"] for c in config_module.configs])
+@pytest.mark.parametrize("config", deepcopy(config_module.configs), ids=[c["name"] for c in config_module.configs])
 @torch.inference_mode()
 def test_sdpa_choice_kv_cache(config):
-    from torch.backends.cuda import (
-        SDPAParams,
-        SDPBackend,
-        can_use_efficient_attention,
-        can_use_flash_attention,
-        flash_sdp_enabled,
-        math_sdp_enabled,
-        mem_efficient_sdp_enabled,
-    )
-
-    from lit_gpt import GPT
-
     torch.set_default_dtype(torch.float16)
 
     def assert_sdpa_backend(original_fn, q, k, v, mask):
-        params = SDPAParams(q, k, v, mask, 0.0, True)
+        # SDPAParams gained an additional argument in PyTorch 2.5
+        args = []
+        if hasattr(SDPAParams, "enable_gqa"):
+            args.append(False)
+        params = SDPAParams(q, k, v, mask, 0.0, True, *args)
         if expected is SDPBackend.FLASH_ATTENTION:
             assert flash_sdp_enabled()
             assert can_use_flash_attention(params, True)
@@ -815,9 +839,7 @@ def test_sdpa_choice_kv_cache(config):
 
 @RunIf(min_cuda_gpus=2, standalone=True)
 def test_rope_init_under_fsdp():
-    """Check that the rope cache is properly intialized"""
-    from lit_gpt import GPT
-
+    """Check that the rope cache is properly initialized"""
     fabric = Fabric(devices=2, strategy="fsdp", accelerator="cuda")
     fabric.launch()
 
@@ -832,3 +854,12 @@ def test_rope_init_under_fsdp():
     cos, sin = model.rope_cache(device=fabric.device)
     torch.testing.assert_close(model.cos, cos)
     torch.testing.assert_close(model.sin, sin)
+
+
+@RunIf(min_cuda_gpus=1)
+def test_reset_parameters_device():
+    with torch.device("meta"):
+        model = GPT.from_name("pythia-14m", n_layer=1)
+    _materialize_meta_tensors(model, torch.device("cuda"))
+    model.reset_parameters()
+    assert model.cos.device.type == "cuda"

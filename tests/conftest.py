@@ -1,21 +1,14 @@
 # Copyright Lightning AI. Licensed under the Apache License 2.0, see LICENSE file.
 
 import os
-import sys
+import shutil
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import pytest
 import torch
 from lightning.fabric.utilities.testing import _runif_reasons
-
-wd = Path(__file__).parent.parent.absolute()
-
-
-@pytest.fixture(autouse=True)
-def add_wd_to_path():
-    # this adds support for running tests without the package installed
-    sys.path.append(str(wd))
+from lightning_utilities.core.imports import RequirementCache
 
 
 @pytest.fixture()
@@ -24,7 +17,7 @@ def fake_checkpoint_dir(tmp_path):
     checkpoint_dir = tmp_path / "checkpoints" / "tmp"
     checkpoint_dir.mkdir(parents=True)
     (checkpoint_dir / "lit_model.pth").touch()
-    (checkpoint_dir / "lit_config.json").touch()
+    (checkpoint_dir / "model_config.yaml").touch()
     (checkpoint_dir / "tokenizer.json").touch()
     (checkpoint_dir / "tokenizer_config.json").touch()
     return checkpoint_dir
@@ -56,12 +49,29 @@ def restore_default_dtype():
     torch.set_default_dtype(torch.float32)
 
 
+@pytest.fixture(autouse=True)
+def destroy_process_group():
+    yield
+
+    import torch.distributed
+
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
+
 class MockTokenizer:
     """A dummy tokenizer that encodes each character as its ASCII code."""
-    def encode(self, text: str, eos: bool = False, max_length: int = -1) -> torch.Tensor:
-        output = [ord(c) for c in text]
+    
+    bos_id = 0
+    eos_id = 1
+
+    def encode(self, text: str, bos: Optional[bool] = None, eos: bool = False, max_length: int = -1) -> torch.Tensor:
+        output = []
+        if bos:
+            output.append(self.bos_id)
+        output.extend([ord(c) for c in text])
         if eos:
-            output.append(1)
+            output.append(self.eos_id)
         output = output[:max_length] if max_length > 0 else output
         return torch.tensor(output)
 
@@ -70,12 +80,44 @@ class MockTokenizer:
 
 
 @pytest.fixture()
-def mock_tockenizer():
+def mock_tokenizer():
     return MockTokenizer()
 
 
-def RunIf(**kwargs):
+@pytest.fixture()
+def alpaca_path(tmp_path):
+    file = Path(__file__).parent / "data" / "fixtures" / "alpaca.json"
+    shutil.copyfile(file, tmp_path / "alpaca.json")
+    return tmp_path / "alpaca.json"
+
+
+@pytest.fixture()
+def dolly_path(tmp_path):
+    file = Path(__file__).parent / "data" / "fixtures" / "dolly.json"
+    shutil.copyfile(file, tmp_path / "dolly.json")
+    return tmp_path / "dolly.json"
+
+
+@pytest.fixture()
+def longform_path(tmp_path):
+    path = tmp_path / "longform"
+    path.mkdir()
+    for split in ("train", "val"):
+        file = Path(__file__).parent / "data" / "fixtures" / f"longform_{split}.json"
+        shutil.copyfile(file, path / f"{split}.json")
+    return path
+
+
+def RunIf(thunder: Optional[bool] = None, **kwargs):
     reasons, marker_kwargs = _runif_reasons(**kwargs)
+
+    if thunder is not None:
+        thunder_available = bool(RequirementCache("lightning-thunder", "thunder"))
+        if thunder and not thunder_available:
+            reasons.append("Thunder")
+        elif not thunder and thunder_available:
+            reasons.append("not Thunder")
+
     return pytest.mark.skipif(condition=len(reasons) > 0, reason=f"Requires: [{' + '.join(reasons)}]", **marker_kwargs)
 
 

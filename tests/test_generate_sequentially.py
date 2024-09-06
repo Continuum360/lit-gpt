@@ -1,7 +1,7 @@
 # Copyright Lightning AI. Licensed under the Apache License 2.0, see LICENSE file.
 
 import itertools
-import json
+import math
 import subprocess
 import sys
 from collections import defaultdict
@@ -11,28 +11,51 @@ from re import escape
 
 import pytest
 import torch
-from conftest import RunIf
+import yaml
+from tests.conftest import RunIf
 from lightning import Fabric
+
+from litgpt import Config
+from litgpt.generate.sequentially import layer_to_device, replace_device, sequential
+from litgpt.model import GPT, Block
+from litgpt.scripts.download import download_from_hub
 
 
 @pytest.mark.parametrize(
     ("n_layer", "devices", "expected"),
     [
+        (6, 1, {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0}),
         (6, 2, {0: 0, 1: 0, 2: 0, 3: 1, 4: 1, 5: 1}),
         (6, 3, {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2}),
-        (6, 1, {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0}),
+        (6, 4, {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2}),
+        (6, 5, {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2}),
+        (6, 6, {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5}),
     ],
 )
 def test_layer_to_device(n_layer, devices, expected):
-    from generate.sequentially import layer_to_device
-    from lit_gpt.model import GPT, Block
-
     with torch.device("meta"):
         model = GPT.from_name("pythia-14m", n_layer=n_layer)
 
-    actual = layer_to_device(model, Block, chunk_size=n_layer // devices)
+    max_layers_per_device = math.ceil(n_layer / devices)
+    actual = layer_to_device(model, Block, chunk_size=max_layers_per_device)
     expected = {f"transformer.h.{i}": v for i, v in expected.items()}
     assert actual == expected
+
+
+def test_sequential_layer_to_device_mapping_not_possible():
+    # Fewer layers than devices
+    config = Config(n_layer=1)
+    with torch.device("meta"):
+        model = GPT(config)
+    with pytest.raises(ValueError, match="number of layers in the model must be larger than the number of devices"):
+        sequential(model, root=torch.device("cpu"), max_seq_length=128, devices=2)
+
+    # Last device would get 0 layers
+    config = Config(n_layer=6)
+    with torch.device("meta"):
+        model = GPT(config)
+    with pytest.raises(RuntimeError, match="Not able to distribute the 6 layers across 4 devices"):
+        sequential(model, root=torch.device("cpu"), max_seq_length=128, devices=4)
 
 
 def path_to_device(model):
@@ -40,8 +63,6 @@ def path_to_device(model):
 
 
 def test_replace_device():
-    from generate.sequentially import replace_device
-
     class Submodule(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -86,9 +107,6 @@ def test_replace_device():
 
 
 def _test_model_1device(accelerator):
-    from generate.sequentially import sequential
-    from lit_gpt import GPT
-
     fabric = Fabric(accelerator=accelerator, devices=1)
     with torch.device("meta"):
         model = GPT.from_name("pythia-14m", n_layer=2)
@@ -157,9 +175,6 @@ def find_forward_hooks(module):
 
 @RunIf(min_cuda_gpus=2)
 def test_model_forward_hooks():
-    from generate.sequentially import sequential
-    from lit_gpt import GPT
-
     fabric = Fabric(accelerator="cuda", devices=1)
     with torch.device("meta"):
         model = GPT.from_name("pythia-14m")  # 6 layers
@@ -274,37 +289,32 @@ root = Path(__file__).parent.parent.resolve()
 
 @RunIf(min_cuda_gpus=2)
 def test_base_with_sequentially(tmp_path):
-    from lit_gpt import GPT, Config
-    from scripts.download import download_from_hub
-
     # download the tokenizer
     download_from_hub(repo_id="EleutherAI/pythia-14m", tokenizer_only=True, checkpoint_dir=tmp_path)
     checkpoint_dir = tmp_path / "EleutherAI/pythia-14m"
     # save the config
     config = Config.from_name("pythia-14m")
-    (checkpoint_dir / "lit_config.json").write_text(json.dumps(asdict(config)))
+    (checkpoint_dir / "model_config.yaml").write_text(yaml.dump(asdict(config)))
     # create a state dict to load from
     torch.save(GPT(config).state_dict(), checkpoint_dir / "lit_model.pth")
 
     args = [
+        str(checkpoint_dir),
         "--num_samples=1",
         "--max_new_tokens=10",
         "--precision=16-true",
         "--temperature=0.0",
-        f"--checkpoint_dir={str(checkpoint_dir)}",
     ]
     env = {"CUDA_VISIBLE_DEVICES": "0,1"}
-    base_stdout = subprocess.check_output([sys.executable, root / "generate/base.py", *args], env=env).decode()
     sequential_stdout = subprocess.check_output(
-        [sys.executable, root / "generate/sequentially.py", *args], env=env
+        [sys.executable, "-m", "litgpt", "generate_sequentially", *args], env=env, cwd=root,
     ).decode()
 
-    assert base_stdout.startswith("What food do llamas eat?")
-    assert base_stdout == sequential_stdout
+    assert "What food do llamas eat?" in sequential_stdout
 
 
 def test_cli():
-    cli_path = root / "generate" / "sequentially.py"
-    output = subprocess.check_output([sys.executable, cli_path, "-h"])
+    args = ["litgpt", "generate_sequentially", "-h"]
+    output = subprocess.check_output(args)
     output = str(output.decode())
-    assert "Generates text samples" in output
+    assert "Generation script that partitions layers across" in output
