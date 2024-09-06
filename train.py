@@ -18,9 +18,9 @@ from torch.utils.data import DataLoader, IterableDataset
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
-from lit_gpt import Config, Tokenizer
-from lit_gpt.model import GPT, Block
-from lit_gpt.utils import chunked_cross_entropy, estimate_flops, get_default_supported_precision, num_parameters
+from litgpt import Config, Tokenizer
+from litgpt.model import GPT, Block
+from litgpt.utils import chunked_cross_entropy, estimate_flops, get_default_supported_precision, num_parameters
 
 model_name = "pythia-14m" # pythia-14m # pythia-31m # pythia-70m
 name = "cosmos"
